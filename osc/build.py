@@ -35,6 +35,15 @@ change_personality = {
             'sparcv8': 'linux32',
         }
 
+# FIXME: qemu_can_build should not be needed anymore since OBS 2.3
+qemu_can_build = [ 'armv4l', 'armv5el', 'armv5l', 'armv6l', 'armv7l', 'armv6el', 'armv7el', 'armv7hl', 'armv8el',
+                   'sh4', 'mips', 'mipsel',
+                   'ppc', 'ppc64',
+                   's390', 's390x',
+                   'sparc64v', 'sparcv9v', 'sparcv9', 'sparcv8', 'sparc',
+                   'hppa'
+        ]
+
 can_also_build = {
              'armv4l': [                                         'armv4l'                                             ],
              'armv6l' :[                                         'armv4l', 'armv5l', 'armv6l', 'armv5el', 'armv6el'                       ],
@@ -49,13 +58,12 @@ can_also_build = {
              's390x':  ['s390' ],
              'ppc64':  [                        'ppc', 'ppc64' ],
              'sh4':    [                                                                                               'sh4' ],
-             'i386':   [        'i586',         'ppc', 'ppc64',  'armv4l', 'armv5el', 'armv5l', 'armv6l', 'armv7l', 'armv6el', 'armv7el', 'armv7hl', 'armv8el', 'sh4', 'mips', 'mipsel' ],
-             'i586':   [                'i386', 'ppc', 'ppc64',  'armv4l', 'armv5el', 'armv5l', 'armv6l', 'armv7l', 'armv6el', 'armv7el', 'armv7hl', 'armv8el', 'sh4', 'mips', 'mipsel' ],
-             'i686':   [        'i586',         'ppc', 'ppc64',  'armv4l', 'armv5el', 'armv5l', 'armv6l', 'armv7l', 'armv6el', 'armv7el', 'armv7hl', 'armv8el', 'sh4', 'mips', 'mipsel' ],
-             'x86_64': ['i686', 'i586', 'i386', 'ppc', 'ppc64',  'armv4l', 'armv5el', 'armv5l', 'armv6l', 'armv7l', 'armv6el', 'armv7el', 'armv7hl', 'armv8el', 'sh4', 'mips', 'mipsel' ],
+             'i586':   [                'i386' ],
+             'i686':   [        'i586', 'i386' ],
+             'x86_64': ['i686', 'i586', 'i386' ],
              'sparc64': ['sparc64v', 'sparcv9v', 'sparcv9', 'sparcv8', 'sparc'],
              'parisc': ['hppa'],
-             }
+        }
 
 # real arch of this machine
 hostarch = os.uname()[4]
@@ -99,6 +107,10 @@ class Buildinfo:
             self.pacsuffix = 'deb'
 
         self.buildarch = root.find('arch').text
+        if root.find('hostarch') != None:
+            self.hostarch = root.find('hostarch').text
+        else:
+            self.hostarch = None
         if root.find('release') != None:
             self.release = root.find('release').text
         else:
@@ -152,7 +164,7 @@ class Pac:
     def __init__(self, node, buildarch, pacsuffix, apiurl, localpkgs = []):
 
         self.mp = {}
-        for i in ['name', 'package',
+        for i in ['binary', 'package',
                   'version', 'release',
                   'project', 'repository',
                   'preinstall', 'vminstall', 'noinstall', 'runscripts',
@@ -164,6 +176,7 @@ class Pac:
         self.mp['pacsuffix']  = pacsuffix
 
         self.mp['arch'] = node.get('arch') or self.mp['buildarch']
+        self.mp['name'] = node.get('name') or self.mp['binary']
 
         # this is not the ideal place to check if the package is a localdep or not
         localdep = self.mp['name'] in localpkgs and not self.mp['noinstall']
@@ -185,14 +198,15 @@ class Pac:
         self.mp['apiurl'] = apiurl
 
         if pacsuffix == 'deb':
-            self.filename = debquery.DebQuery.filename(self.mp['name'], self.mp['version'], self.mp['release'], self.mp['arch'])
+            filename = debquery.DebQuery.filename(self.mp['name'], self.mp['version'], self.mp['release'], self.mp['arch'])
         else:
-            self.filename = rpmquery.RpmQuery.filename(self.mp['name'], self.mp['version'], self.mp['release'], self.mp['arch'])
+            filename = rpmquery.RpmQuery.filename(self.mp['name'], self.mp['version'], self.mp['release'], self.mp['arch'])
 
-        self.mp['filename'] = self.filename
+        self.mp['filename'] = node.get('binary') or filename
         if self.mp['repopackage'] == '_repository':
             self.mp['repofilename'] = self.mp['name']
         else:
+            # OBS 2.3 puts binary into product bdeps (noinstall ones)
             self.mp['repofilename'] = self.mp['filename']
 
         # make the content of the dictionary accessible as class attributes
@@ -617,10 +631,17 @@ def main(apiurl, opts, argv):
     # real arch of this machine
     # vs.
     # arch we are supposed to build for
-    if hostarch != bi.buildarch:
-        if not bi.buildarch in can_also_build.get(hostarch, []):
-            print >>sys.stderr, 'Error: hostarch \'%s\' cannot build \'%s\'.' % (hostarch, bi.buildarch)
+    if bi.hostarch != None:
+        if hostarch != bi.hostarch and not hostarch in can_also_build.get(hostarch, []):
+            print >>sys.stderr, 'Error: hostarch \'%s\' is required.' % (bi.hostarch)
             return 1
+    elif hostarch != bi.buildarch:
+        if not bi.buildarch in can_also_build.get(hostarch, []):
+            # OBSOLETE: qemu_can_build should not be needed anymore since OBS 2.3
+            if not bi.buildarch in qemu_can_build:
+                print >>sys.stderr, 'Error: hostarch \'%s\' cannot build \'%s\'.' % (hostarch, bi.buildarch)
+                return 1
+            print >>sys.stderr, 'WARNING: It is guessed to build on hostarch \'%s\' for \'%s\' via QEMU.' % (hostarch, bi.buildarch)
 
     rpmlist_prefers = []
     if prefer_pkgs:
@@ -833,6 +854,9 @@ def main(apiurl, opts, argv):
             vm_options += [ '--vmdisk-rootsize=' + config['build-vmdisk-rootsize'] ]
         if config['build-vmdisk-swapsize']:
             vm_options += [ '--vmdisk-swapsize=' + config['build-vmdisk-swapsize'] ]
+        if config['build-vmdisk-filesystem']:
+            vm_options += [ '--vmdisk-filesystem=' + config['build-vmdisk-filesystem'] ]
+
 
     if opts.preload:
         print "Preload done for selected repo/arch."

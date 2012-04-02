@@ -1,3 +1,21 @@
+0.134
+  - patchinfo call can work without checked out copy now
+  - use qemu as fallback for building not directly supported architectures
+  - "results --watch" option to watch build results until they finished building
+  - setlinkrev and linkpac ---current is setting vrev. this requires OBS 2.1.17 or 2.3
+  - security fix for buildlog function, terminal control characters are limited now.
+#
+# Features which requires OBS 2.3
+#
+  - support dryrun of branching to preview the expected result. "osc sm" is doing this now by default.
+  - maintenance requests accept package lists as source and target incidents to be merged in
+  - add "setincident" command to "request" to re-direct a maintenance request
+  - ask user to create "maintenance incident" request when submit request is failing at release project
+  - "osc my patchinfos" is showing patchinfos where any open bug is assigned to user
+  - "osc my" or "osc my work" is including assigned patchinfos
+  - "osc branch --maintenance" is creating setups for maintenance
+  - "osc unlock" command to unlock packages or projects
+
 0.133
   - add --meta option also to "list", "cat" and "less" commands
   - project checkout is skipping packages linking to project local packages by default
