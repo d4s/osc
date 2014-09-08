@@ -3,6 +3,8 @@
 # and distributed under the terms of the GNU General Public Licence,
 # either version 2, or version 3 (at your option).
 
+from __future__ import print_function
+
 """Read osc configuration and store it in a dictionary
 
 This module reads and parses ~/.oscrc. The resulting configuration is stored
@@ -34,20 +36,32 @@ The configuration dictionary could look like this:
 
 """
 
+import bz2
 import base64
-import cookielib
-import httplib
 import os
 import re
 import sys
-import StringIO
-import urllib
-import urllib2
-import urlparse
 
-import OscConfigParser
+try:
+    from http.cookiejar import LWPCookieJar, CookieJar
+    from http.client import HTTPConnection, HTTPResponse
+    from io import StringIO
+    from urllib.parse import urlsplit
+    from urllib.error import URLError
+    from urllib.request import HTTPBasicAuthHandler, HTTPCookieProcessor, HTTPPasswordMgrWithDefaultRealm, ProxyHandler
+    from urllib.request import AbstractHTTPHandler, build_opener, proxy_bypass
+except ImportError:
+    #python 2.x
+    from cookielib import LWPCookieJar, CookieJar
+    from httplib import HTTPConnection, HTTPResponse
+    from StringIO import StringIO
+    from urlparse import urlsplit
+    from urllib2 import URLError, HTTPBasicAuthHandler, HTTPCookieProcessor, HTTPPasswordMgrWithDefaultRealm, ProxyHandler
+    from urllib2 import AbstractHTTPHandler, build_opener, proxy_bypass
+
+from . import OscConfigParser
 from osc import oscerr
-from oscsslexcp import NoSecureSSLError
+from .oscsslexcp import NoSecureSSLError
 
 GENERIC_KEYRING = False
 GNOME_KEYRING = False
@@ -77,7 +91,7 @@ def _get_processors():
     """
     try:
         return os.sysconf('SC_NPROCESSORS_ONLN')
-    except ValueError, e:
+    except ValueError as e:
         return 1
 
 DEFAULTS = {'apiurl': 'https://api.opensuse.org',
@@ -90,7 +104,7 @@ DEFAULTS = {'apiurl': 'https://api.opensuse.org',
             # build type settings
             'build-cmd': '/usr/bin/build',
             'build-type': '',                   # may be empty for chroot, kvm or xen
-            'build-root': '/var/tmp/build-root',
+            'build-root': '/var/tmp/build-root/%(repo)s-%(arch)s',
             'build-uid': '',                    # use the default provided by build
             'build-device': '',                 # required for VM builds
             'build-memory': '',                 # required for VM builds
@@ -103,6 +117,8 @@ DEFAULTS = {'apiurl': 'https://api.opensuse.org',
             'builtin_signature_check': '1',     # by default use builtin check for verify pkgs
             'icecream': '0',
 
+            'buildlog_strip_time': '0',  # strips the build time from the build log
+
             'debug': '0',
             'http_debug': '0',
             'http_full_debug': '0',
@@ -110,8 +126,8 @@ DEFAULTS = {'apiurl': 'https://api.opensuse.org',
             'verbose': '1',
             'traceback': '0',
             'post_mortem': '0',
-            'use_keyring': '1',
-            'gnome_keyring': '1',
+            'use_keyring': '0',
+            'gnome_keyring': '0',
             'cookiejar': '~/.osc_cookiejar',
             # fallback for osc build option --no-verify
             'no_verify': '0',
@@ -142,6 +158,9 @@ DEFAULTS = {'apiurl': 'https://api.opensuse.org',
             # what to do with the source package if the submitrequest has been accepted
             'submitrequest_on_accept_action': '',
             'request_show_interactive': '0',
+            # if a review is accepted in interactive mode and a group
+            # was specified the review will be accepted for this group
+            'review_inherit_group': '0',
             'submitrequest_accepted_template': '',
             'submitrequest_declined_template': '',
             'linkcontrol': '0',
@@ -161,8 +180,8 @@ config = DEFAULTS.copy()
 
 boolean_opts = ['debug', 'do_package_tracking', 'http_debug', 'post_mortem', 'traceback', 'check_filelist', 'plaintext_passwd',
     'checkout_no_colon', 'checkout_rooted', 'check_for_request_on_action', 'linkcontrol', 'show_download_progress', 'request_show_interactive',
-    'use_keyring', 'gnome_keyring', 'no_verify', 'builtin_signature_check', 'http_full_debug', 'include_request_from_project',
-    'local_service_run']
+    'review_inherit_group', 'use_keyring', 'gnome_keyring', 'no_verify', 'builtin_signature_check', 'http_full_debug',
+    'include_request_from_project', 'local_service_run', 'buildlog_strip_time']
 
 api_host_options = ['user', 'pass', 'passx', 'aliases', 'http_headers', 'email', 'sslcertck', 'cafile', 'capath', 'trusted_prj']
 
@@ -228,6 +247,9 @@ apiurl = %(apiurl)s
 # on the host.
 # This should not be 0
 # build-uid =
+
+# strip leading build time information from the build log
+# buildlog_strip_time = 1
 
 # extra packages to install when building packages locally (osc build)
 # this corresponds to osc build's -x option and can be overridden with that
@@ -305,6 +327,10 @@ apiurl = %(apiurl)s
 #review requests interactively (default: off)
 #request_show_review = 1
 
+# if a review is accepted in interactive mode and a group
+# was specified the review will be accepted for this group (default: off)
+#review_inherit_group = 1
+
 [%(apiurl)s]
 user = %(user)s
 pass = %(pass)s
@@ -346,13 +372,13 @@ cookiejar = None
 
 def parse_apisrv_url(scheme, apisrv):
     if apisrv.startswith('http://') or apisrv.startswith('https://'):
-        return urlparse.urlsplit(apisrv)[0:2]
+        return urlsplit(apisrv)[0:2]
     elif scheme != None:
         # the split/join is needed to get a proper url (e.g. without a trailing slash)
-        return urlparse.urlsplit(urljoin(scheme, apisrv))[0:2]
+        return urlsplit(urljoin(scheme, apisrv))[0:2]
     else:
         msg = 'invalid apiurl \'%s\' (specify the protocol (http:// or https://))' % apisrv
-        raise urllib2.URLError(msg)
+        raise URLError(msg)
 
 
 def urljoin(scheme, apisrv):
@@ -394,8 +420,8 @@ def get_apiurl_usr(apiurl):
     try:
         return get_apiurl_api_host_options(apiurl)['user']
     except KeyError:
-        print >>sys.stderr, 'no specific section found in config file for host of [\'%s\'] - using default user: \'%s\'' \
-            % (apiurl, config['user'])
+        print('no specific section found in config file for host of [\'%s\'] - using default user: \'%s\'' \
+            % (apiurl, config['user']), file=sys.stderr)
         return config['user']
 
 
@@ -415,23 +441,23 @@ def _build_opener(url):
         return _build_opener.last_opener[1]
 
     # respect no_proxy env variable
-    if urllib.proxy_bypass(apiurl):
+    if proxy_bypass(apiurl):
         # initialize with empty dict
-        proxyhandler = urllib2.ProxyHandler({})
+        proxyhandler = ProxyHandler({})
     else:
         # read proxies from env
-        proxyhandler = urllib2.ProxyHandler()
+        proxyhandler = ProxyHandler()
 
     # workaround for http://bugs.python.org/issue9639
-    authhandler_class = urllib2.HTTPBasicAuthHandler
+    authhandler_class = HTTPBasicAuthHandler
     if sys.version_info >= (2, 6, 6) and sys.version_info < (2, 7, 1) \
-        and not 'reset_retry_count' in dir(urllib2.HTTPBasicAuthHandler):
-        print >>sys.stderr, 'warning: your urllib2 version seems to be broken. ' \
-            'Using a workaround for http://bugs.python.org/issue9639'
+        and not 'reset_retry_count' in dir(HTTPBasicAuthHandler):
+        print('warning: your urllib2 version seems to be broken. ' \
+            'Using a workaround for http://bugs.python.org/issue9639', file=sys.stderr)
 
-        class OscHTTPBasicAuthHandler(urllib2.HTTPBasicAuthHandler):
+        class OscHTTPBasicAuthHandler(HTTPBasicAuthHandler):
             def http_error_401(self, *args):
-                response = urllib2.HTTPBasicAuthHandler.http_error_401(self, *args)
+                response = HTTPBasicAuthHandler.http_error_401(self, *args)
                 self.retried = 0
                 return response
 
@@ -440,8 +466,8 @@ def _build_opener(url):
                 return None
 
         authhandler_class = OscHTTPBasicAuthHandler
-    elif sys.version_info >= (2, 6, 6) and sys.version_info < (2, 7, 1):
-        class OscHTTPBasicAuthHandler(urllib2.HTTPBasicAuthHandler):
+    elif sys.version_info >= (2, 6, 6) and sys.version_info < (2, 7, 99):
+        class OscHTTPBasicAuthHandler(HTTPBasicAuthHandler):
             def http_error_404(self, *args):
                 self.reset_retry_count()
                 return None
@@ -450,12 +476,12 @@ def _build_opener(url):
     elif sys.version_info >= (2, 6, 5) and sys.version_info < (2, 6, 6):
         # workaround for broken urllib2 in python 2.6.5: wrong credentials
         # lead to an infinite recursion
-        class OscHTTPBasicAuthHandler(urllib2.HTTPBasicAuthHandler):
+        class OscHTTPBasicAuthHandler(HTTPBasicAuthHandler):
             def retry_http_basic_auth(self, host, req, realm):
                 # don't retry if auth failed
                 if req.get_header(self.auth_header, None) is not None:
                     return None
-                return urllib2.HTTPBasicAuthHandler.retry_http_basic_auth(self, host, req, realm)
+                return HTTPBasicAuthHandler.retry_http_basic_auth(self, host, req, realm)
 
         authhandler_class = OscHTTPBasicAuthHandler
 
@@ -463,15 +489,15 @@ def _build_opener(url):
     # with None as first argument, it will always use this username/password
     # combination for urls for which arg2 (apisrv) is a super-url
     authhandler = authhandler_class( \
-        urllib2.HTTPPasswordMgrWithDefaultRealm())
+        HTTPPasswordMgrWithDefaultRealm())
     authhandler.add_password(None, apiurl, options['user'], options['pass'])
 
     if options['sslcertck']:
         try:
-            import oscssl
+            from . import oscssl
             from M2Crypto import m2urllib2
-        except ImportError, e:
-            print e
+        except ImportError as e:
+            print(e)
             raise NoSecureSSLError('M2Crypto is needed to access %s in a secure way.\nPlease install python-m2crypto.' % apiurl)
 
         cafile = options.get('cafile', None)
@@ -484,13 +510,15 @@ def _build_opener(url):
                 elif os.path.isdir(i):
                     capath = i
                     break
+        if not cafile and not capath:
+            raise Exception('No CA certificates found')
         ctx = oscssl.mySSLContext()
         if ctx.load_verify_locations(capath=capath, cafile=cafile) != 1:
             raise Exception('No CA certificates found')
-        opener = m2urllib2.build_opener(ctx, oscssl.myHTTPSHandler(ssl_context=ctx, appname='osc'), urllib2.HTTPCookieProcessor(cookiejar), authhandler, proxyhandler)
+        opener = m2urllib2.build_opener(ctx, oscssl.myHTTPSHandler(ssl_context=ctx, appname='osc'), HTTPCookieProcessor(cookiejar), authhandler, proxyhandler)
     else:
-        print >>sys.stderr, "WARNING: SSL certificate checks disabled. Connection is insecure!\n"
-        opener = urllib2.build_opener(urllib2.HTTPCookieProcessor(cookiejar), authhandler, proxyhandler)
+        print("WARNING: SSL certificate checks disabled. Connection is insecure!\n", file=sys.stderr)
+        opener = build_opener(HTTPCookieProcessor(cookiejar), authhandler, proxyhandler)
     opener.addheaders = [('User-agent', 'osc/%s' % __version__)]
     _build_opener.last_opener = (apiurl, opener)
     return opener
@@ -502,12 +530,21 @@ def init_basicauth(config):
     def filterhdrs(meth, ishdr, *hdrs):
         # this is so ugly but httplib doesn't use
         # a logger object or such
-        def new_method(*args, **kwargs):
-            stdout = sys.stdout
-            sys.stdout = StringIO.StringIO()
-            meth(*args, **kwargs)
-            hdr = sys.stdout.getvalue()
-            sys.stdout = stdout
+        def new_method(self, *args, **kwargs):
+            # check if this is a recursive call (note: we do not
+            # have to care about thread safety)
+            is_rec_call = getattr(self, '_orig_stdout', None) is not None
+            try:
+                if not is_rec_call:
+                    self._orig_stdout = sys.stdout
+                    sys.stdout = StringIO()
+                meth(self, *args, **kwargs)
+                hdr = sys.stdout.getvalue()
+            finally:
+                # restore original stdout
+                if not is_rec_call:
+                    sys.stdout = self._orig_stdout
+                    del self._orig_stdout
             for i in hdrs:
                 if ishdr:
                     hdr = re.sub(r'%s:[^\\r]*\\r\\n' % i, '', hdr)
@@ -518,8 +555,8 @@ def init_basicauth(config):
         return new_method
 
     if config['http_debug'] and not config['http_full_debug']:
-        httplib.HTTPConnection.send = filterhdrs(httplib.HTTPConnection.send, True, 'Cookie', 'Authorization')
-        httplib.HTTPResponse.begin = filterhdrs(httplib.HTTPResponse.begin, False, 'header: Set-Cookie.*\n')
+        HTTPConnection.send = filterhdrs(HTTPConnection.send, True, 'Cookie', 'Authorization')
+        HTTPResponse.begin = filterhdrs(HTTPResponse.begin, False, 'header: Set-Cookie.*\n')
 
     if sys.version_info < (2, 6):
         # HTTPS proxy is not supported in old urllib2. It only leads to an error
@@ -533,20 +570,21 @@ def init_basicauth(config):
         # brute force
         def urllib2_debug_init(self, debuglevel=0):
             self._debuglevel = 1
-        urllib2.AbstractHTTPHandler.__init__ = urllib2_debug_init
+        AbstractHTTPHandler.__init__ = urllib2_debug_init
 
     cookie_file = os.path.expanduser(config['cookiejar'])
     global cookiejar
-    cookiejar = cookielib.LWPCookieJar(cookie_file)
+    cookiejar = LWPCookieJar(cookie_file)
     try:
         cookiejar.load(ignore_discard=True)
     except IOError:
         try:
-            open(cookie_file, 'w').close()
-            os.chmod(cookie_file, 0600)
-        except:
+            fd = os.open(cookie_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            os.close(fd)
+        except IOError:
+            # hmm is any good reason why we should catch the IOError?
             #print 'Unable to create cookiejar file: \'%s\'. Using RAM-based cookies.' % cookie_file
-            cookiejar = cookielib.CookieJar()
+            cookiejar = CookieJar()
 
 
 def get_configParser(conffile=None, force_read=False):
@@ -575,7 +613,7 @@ def write_config(fname, cp):
         cp.write(f, comments=True)
     try:
         os.rename(fname + '.new', fname)
-        os.chmod(fname, 0600)
+        os.chmod(fname, 0o600)
     except:
         if os.path.exists(fname + '.new'):
             os.unlink(fname + '.new')
@@ -635,6 +673,13 @@ def config_set_option(section, opt, val=None, delete=False, update=True, **kwarg
         return (opt, cp.get(section, opt, raw=True))
     return (opt, None)
 
+def passx_decode(passx):
+    """decode the obfuscated password back to plain text password"""
+    return bz2.decompress(base64.b64decode(passx.encode("ascii"))).decode("ascii")
+
+def passx_encode(passwd):
+    """encode plain text password to obfuscated form"""
+    return base64.b64encode(bz2.compress(passwd.encode('ascii'))).decode("ascii")
 
 def write_initial_config(conffile, entries, custom_template=''):
     """
@@ -666,9 +711,9 @@ def write_initial_config(conffile, entries, custom_template=''):
     if not config['plaintext_passwd']:
         config['pass'] = ''
     else:
-        config['passx'] = base64.b64encode(config['pass'].encode('bz2'))
+        config['passx'] = passx_encode(config['pass'])
 
-    sio = StringIO.StringIO(conf_template.strip() % config)
+    sio = StringIO(conf_template.strip() % config)
     cp = OscConfigParser.OscConfigParser(DEFAULTS)
     cp.readfp(sio)
     write_config(conffile, cp)
@@ -682,7 +727,7 @@ def add_section(filename, url, user, passwd):
     cp = get_configParser(filename)
     try:
         cp.add_section(url)
-    except OscConfigParser.ConfigParser.DuplicateSectionError:
+    except OscConfigParser.configparser.DuplicateSectionError:
         # Section might have existed, but was empty
         pass
     if config['use_keyring'] and GENERIC_KEYRING:
@@ -706,7 +751,7 @@ def add_section(filename, url, user, passwd):
         cp.set(url, 'user', user)
         if not config['plaintext_passwd']:
             cp.remove_option(url, 'pass')
-            cp.set(url, 'passx', base64.b64encode(passwd.encode('bz2')))
+            cp.set(url, 'passx', passx_encode(passwd))
         else:
             cp.remove_option(url, 'passx')
             cp.set(url, 'pass', passwd)
@@ -736,7 +781,7 @@ def get_config(override_conffile=None,
     # okay, we made sure that .oscrc exists
 
     # make sure it is not world readable, it may contain a password.
-    os.chmod(conffile, 0600)
+    os.chmod(conffile, 0o600)
 
     cp = get_configParser(conffile)
 
@@ -752,7 +797,7 @@ def get_config(override_conffile=None,
     for i in boolean_opts:
         try:
             config[i] = cp.getboolean('general', i)
-        except ValueError, e:
+        except ValueError as e:
             raise oscerr.ConfigError('cannot parse \'%s\' setting: ' % i + str(e), conffile)
 
     config['packagecachedir'] = os.path.expanduser(config['packagecachedir'])
@@ -784,11 +829,12 @@ def get_config(override_conffile=None,
         scheme, host = parse_apisrv_url(config.get('scheme', 'https'), url)
         apiurl = urljoin(scheme, host)
         user = None
+        password = None
         if config['use_keyring'] and GENERIC_KEYRING:
             try:
                 # Read from keyring lib if available
                 user = cp.get(url, 'user', raw=True)
-                password = keyring.get_password(host, user)
+                password = str(keyring.get_password(host, user))
             except:
                 # Fallback to file based auth.
                 pass
@@ -796,16 +842,29 @@ def get_config(override_conffile=None,
             # Read from gnome keyring if available
             try:
                 gk_data = gnomekeyring.find_network_password_sync(protocol=scheme, server=host)
-                password = gk_data[0]['password']
+                if not 'user' in gk_data[0]:
+                    raise oscerr.ConfigError('no user found in keyring', conffile)
                 user = gk_data[0]['user']
+                if 'password' in gk_data[0]:
+                    password = str(gk_data[0]['password'])
+                else:
+                    # this is most likely an error
+                    print('warning: no password found in keyring', file=sys.stderr)
             except gnomekeyring.NoMatchError:
                 # Fallback to file based auth.
                 pass
 
         if not user is None and len(user) == 0:
             user = None
-            print >>sys.stderr, 'Warning: blank user in the keyring for the ' \
-                'apiurl %s.\nPlease fix your keyring entry.'
+            print('Warning: blank user in the keyring for the ' \
+                'apiurl %s.\nPlease fix your keyring entry.', file=sys.stderr)
+
+        if user is not None and password is None:
+            err = ('no password defined for "%s".\nPlease fix your keyring '
+                   'entry or gnome-keyring setup.\nAssuming an empty password.'
+                   % url)
+            print(err, file=sys.stderr)
+            password = ''
 
         # Read credentials from config
         if user is None:
@@ -814,7 +873,7 @@ def get_config(override_conffile=None,
             user = cp.get(url, 'user', raw=True)        # need to set raw to prevent '%' expansion
             password = cp.get(url, 'pass', raw=True)    # especially on password!
             try:
-                passwordx = cp.get(url, 'passx', raw=True).decode('base64').decode('bz2')  # especially on password!
+                passwordx = passx_decode(cp.get(url, 'passx', raw=True))  # especially on password!
             except:
                 passwordx = ''
 
@@ -822,17 +881,17 @@ def get_config(override_conffile=None,
                 password = ''
 
             if user is None or user == '':
-                raise oscerr.ConfigError('user is blank for %s, please delete of complete the "user=" entry in %s.' % (apiurl, config['conffile']), config['conffile'])
+                raise oscerr.ConfigError('user is blank for %s, please delete or complete the "user=" entry in %s.' % (apiurl, config['conffile']), config['conffile'])
 
             if config['plaintext_passwd'] and passwordx or not config['plaintext_passwd'] and password:
                 if config['plaintext_passwd']:
                     if password != passwordx:
-                        print >>sys.stderr, '%s: rewriting from encoded pass to plain pass' % url
+                        print('%s: rewriting from encoded pass to plain pass' % url, file=sys.stderr)
                     add_section(conffile, url, user, passwordx)
                     password = passwordx
                 else:
                     if password != passwordx:
-                        print >>sys.stderr, '%s: rewriting from plain pass to encoded pass' % url
+                        print('%s: rewriting from plain pass to encoded pass' % url, file=sys.stderr)
                     add_section(conffile, url, user, password)
 
             if not config['plaintext_passwd']:
@@ -864,6 +923,8 @@ def get_config(override_conffile=None,
                     api_host_options[apiurl][key] = cp.getboolean(url, key)
                 else:
                     api_host_options[apiurl][key] = cp.get(url, key)
+        if cp.has_option(url, 'build-root', proper=True):
+            api_host_options[apiurl]['build-root'] = cp.get(url, 'build-root', raw=True)
 
         if not 'sslcertck' in api_host_options[apiurl]:
             api_host_options[apiurl]['sslcertck'] = True
@@ -889,10 +950,10 @@ def get_config(override_conffile=None,
         scheme = config.get('scheme', 'https')
         config['apiurl'] = urljoin(scheme, apisrv)
     if 'apisrc' in config or 'scheme' in config:
-        print >>sys.stderr, 'Warning: Use of the \'scheme\' or \'apisrv\' in ~/.oscrc is deprecated!\n' \
-                            'Warning: See README for migration details.'
+        print('Warning: Use of the \'scheme\' or \'apisrv\' in ~/.oscrc is deprecated!\n' \
+                            'Warning: See README for migration details.', file=sys.stderr)
     if 'build_platform' in config:
-        print >>sys.stderr, 'Warning: Use of \'build_platform\' config option is deprecated! (use \'build_repository\' instead)'
+        print('Warning: Use of \'build_platform\' config option is deprecated! (use \'build_repository\' instead)', file=sys.stderr)
         config['build_repository'] = config['build_platform']
 
     config['verbose'] = int(config['verbose'])
@@ -921,7 +982,7 @@ def get_config(override_conffile=None,
     # provided that there _are_ credentials for the chosen apiurl:
     try:
         config['user'] = get_apiurl_usr(config['apiurl'])
-    except oscerr.ConfigMissingApiurl, e:
+    except oscerr.ConfigMissingApiurl as e:
         e.msg = config_missing_apiurl_text % config['apiurl']
         e.file = conffile
         raise e

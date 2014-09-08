@@ -1,6 +1,7 @@
 import osc.core
 import osc.oscerr
 import os
+import re
 from common import GET, OscTestCase
 
 FIXTURES_DIR = os.path.join(os.getcwd(), 'difffile_fixtures')
@@ -295,10 +296,40 @@ Binary file 'binary' has changed.
         self.__check_diff(p, '', 3)
 
     def __check_diff(self, p, exp, revision=None):
-        s = ''
+        got = ''
         for i in p.get_diff(revision):
-            s += ''.join(i)
-        self.assertEqual(s, exp)
+            got += ''.join(i)
+
+        # When a hunk header refers to a single line in the "from"
+        # file and/or the "to" file, e.g.
+        #
+        #   @@ -37,37 +41,43 @@
+        #   @@ -37,39 +41,41 @@
+        #   @@ -37,37 +41,41 @@
+        #
+        # some systems will avoid repeating the line number:
+        #
+        #   @@ -37 +41,43 @@
+        #   @@ -37,39 +41 @@
+        #   @@ -37 +41 @@
+        #
+        # so we need to canonise the output to avoid false negative
+        # test failures.
+
+        # TODO: Package.get_diff should return a consistent format
+        #       (regardless of the used python version)
+        def __canonise_diff(diff):
+            # we cannot use re.M because python 2.6's re.sub does
+            # not support a flags argument
+            diff = [re.sub('^@@ -(\d+) ', '@@ -\\1,\\1 ', line)
+                    for line in diff.split('\n')]
+            diff = [re.sub('^(@@ -\d+,\d+) \+(\d+) ', '\\1 +\\2,\\2 ', line)
+                    for line in diff]
+            return '\n'.join(diff)
+
+        got = __canonise_diff(got)
+        exp = __canonise_diff(exp)
+        self.assertEqualMultiline(got, exp)
 
 if __name__ == '__main__':
     import unittest
