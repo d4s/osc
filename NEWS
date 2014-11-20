@@ -1,5 +1,19 @@
+0.150
+  - add "osc api --edit" option to be able to edit some meta files directly
+  - follow the request order of the api (sorting according to priorization)
+
+0.149
+  - removed "--diff" option from the "createrequest" command
+  - introduced new "vc-cmd" config option, which is used to specify the path
+    to the vc script
+  - various bugfixes
+
 0.148
-  -
+  - support new history including review history of OBS 2.6
+  - display request priorities, if important or critical
+  - add "osc rq priorize" command to re-priorize existing requests
+  - allow also "osc rq ls" shortcut
+  - fish shell completion support
 
 0.147
   - support groups in maintainership requests

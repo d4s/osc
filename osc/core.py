@@ -5,7 +5,7 @@
 
 from __future__ import print_function
 
-__version__ = '0.147git'
+__version__ = '0.149git'
 
 # __store_version__ is to be incremented when the format of the working copy
 # "store" changes in an incompatible way. Please add any needed migration
@@ -579,8 +579,6 @@ class Project:
     """
 
     REQ_STOREFILES = ('_project', '_apiurl')
-    if conf.config['do_package_tracking']:
-        REQ_STOREFILES += ('_packages',)
 
     def __init__(self, dir, getPackageList=True, progress_obj=None, wc_check=True):
         """
@@ -641,7 +639,10 @@ class Project:
     def wc_check(self):
         global store
         dirty_files = []
-        for fname in Project.REQ_STOREFILES:
+        req_storefiles = Project.REQ_STOREFILES
+        if conf.config['do_package_tracking']:
+            req_storefiles += ('_packages',)
+        for fname in req_storefiles:
             if not os.path.exists(os.path.join(self.absdir, store, fname)):
                 dirty_files.append(fname)
         return dirty_files
@@ -888,7 +889,7 @@ class Project:
                     elif state == 'D':
                         # pac exists (the non-existent pac case was handled in the first if block)
                         p = Package(os.path.join(self.dir, pac), progress_obj=self.progress_obj)
-                        if p.needs_update(sinfos[p.name]):
+                        if p.update_needed(sinfos[p.name]):
                             p.update()
                     elif state == 'A' and pac in self.pacs_available:
                         # file/dir called pac already exists and is under version control
@@ -2357,6 +2358,10 @@ class AbstractState:
         """return data from <comment /> tag"""
         raise NotImplementedError()
 
+    def get_description(self):
+        """return data from <description /> tag"""
+        raise NotImplementedError()
+
     def to_xml(self):
         """serialize object to XML"""
         root = ET.Element(self.get_node_name())
@@ -2364,6 +2369,8 @@ class AbstractState:
             val = getattr(self, attr)
             if not val is None:
                 root.set(attr, val)
+        if self.get_description():
+            ET.SubElement(root, 'description').text = self.get_description()
         if self.get_comment():
             ET.SubElement(root, 'comment').text = self.get_comment()
         return root
@@ -2400,6 +2407,37 @@ class ReviewState(AbstractState):
     def get_comment(self):
         return self.comment
 
+    def get_description(self):
+        return None
+
+
+class RequestHistory(AbstractState):
+    """Represents a history element of a request"""
+    def __init__(self, history_node):
+        AbstractState.__init__(self, history_node.tag)
+        self.who = history_node.get('who')
+        self.when = history_node.get('when')
+        if not history_node.find('description') is None and \
+            history_node.find('description').text:
+            # OBS 2.6
+            self.description = history_node.find('description').text.strip()
+        else:
+            # OBS 2.5 and before
+            self.description = history_node.get('name')
+        self.comment = ''
+        if not history_node.find('comment') is None and \
+            history_node.find('comment').text:
+            self.comment = history_node.find('comment').text.strip()
+
+    def get_node_attrs(self):
+        return ('who', 'when')
+
+    def get_description(self):
+        return self.description
+
+    def get_comment(self):
+        return self.comment
+
 
 class RequestState(AbstractState):
     """Represents the state of a request"""
@@ -2411,6 +2449,9 @@ class RequestState(AbstractState):
         self.name = state_node.get('name')
         self.who = state_node.get('who')
         self.when = state_node.get('when')
+        if state_node.find('description') is None:
+            # OBS 2.6 has it always, before it did not exist
+            self.description = state_node.get('description')
         self.comment = ''
         if not state_node.find('comment') is None and \
             state_node.find('comment').text:
@@ -2421,6 +2462,9 @@ class RequestState(AbstractState):
 
     def get_comment(self):
         return self.comment
+
+    def get_description(self):
+        return None
 
 
 class Action:
@@ -2553,6 +2597,7 @@ class Request:
         self.reqid = None
         self.title = ''
         self.description = ''
+        self.priority = None
         self.state = None
         self.accept_at = None
         self.actions = []
@@ -2578,8 +2623,10 @@ class Request:
             self.actions.append(Action.from_xml(action))
         for review in root.findall('review'):
             self.reviews.append(ReviewState(review))
-        for hist_state in root.findall('history'):
-            self.statehistory.append(RequestState(hist_state))
+        for history_element in root.findall('history'):
+            self.statehistory.append(RequestHistory(history_element))
+        if not root.find('priority') is None and root.find('priority').text:
+            self.priority = root.find('priority').text.strip()
         if not root.find('accept_at') is None and root.find('accept_at').text:
             self.accept_at = root.find('accept_at').text.strip()
         if not root.find('title') is None:
@@ -2625,6 +2672,8 @@ class Request:
             ET.SubElement(root, 'description').text = self.description
         if self.accept_at:
             ET.SubElement(root, 'accept_at').text = self.accept_at
+        if self.priority:
+            ET.SubElement(root, 'priority').text = self.priority
         return root
 
     def to_str(self):
@@ -2751,7 +2800,7 @@ class Request:
         tmpl = '        Review by %(type)-10s is %(state)-10s %(by)-50s'
         for review in self.reviews:
             lines.append(tmpl % Request.format_review(review))
-        history = ['%s(%s)' % (hist.name, hist.who) for hist in self.statehistory]
+        history = ['%s: %s' % (hist.description, hist.who) for hist in self.statehistory]
         if history:
             lines.append('        From: %s' % ' -> '.join(history))
         if self.description:
@@ -2766,6 +2815,8 @@ class Request:
         lines = ['Request: #%s\n' % self.reqid]
         if self.accept_at and self.state.name in [ 'new', 'review' ]:
             lines.append('    *** This request will get automatically accepted after '+self.accept_at+' ! ***\n')
+        if self.priority in [ 'critical', 'important' ] and self.state.name in [ 'new', 'review' ]:
+            lines.append('    *** This request has classified as '+self.priority+' ! ***\n')
             
         for action in self.actions:
             tmpl = '  %(type)-13s %(source)s %(target)s'
@@ -2802,11 +2853,10 @@ class Request:
         if reviews:
             lines.append('\nReview:  %s' % indent.join(reviews))
 
-        tmpl = '%(name)-10s %(when)-12s %(who)s'
+        tmpl = '%(when)-10s %(who)-12s %(desc)s'
         histories = []
         for hist in reversed(self.statehistory):
-            d = {'name': hist.name, 'when': hist.when,
-                'who': hist.who}
+            d = {'when': hist.when, 'who': hist.who, 'desc': hist.description}
             histories.append(tmpl % d)
         if histories:
             lines.append('\nHistory: %s' % indent.join(histories))
@@ -3779,7 +3829,6 @@ def _edit_message_open_editor(filename, data, orig_mtime):
     return os.stat(filename).st_mtime != orig_mtime
 
 def edit_message(footer='', template='', templatelen=30):
-    import tempfile
     delim = '--This line, and those below, will be ignored--\n'
     data = ''
     if template != '':
@@ -3789,18 +3838,24 @@ def edit_message(footer='', template='', templatelen=30):
             if lines[templatelen:]:
                 footer = '%s\n\n%s' % ('\n'.join(lines[templatelen:]), footer)
     data += '\n' + delim + '\n' + footer
+    edit_text(data, delim, suffix='.diff', template=template)
+
+def edit_text(data='', delim=None, suffix='.txt', template=''):
+    import tempfile
     try:
-        (fd, filename) = tempfile.mkstemp(prefix='osc-commitmsg', suffix='.diff')
+        (fd, filename) = tempfile.mkstemp(prefix='osc-editor', suffix=suffix)
         os.close(fd)
         mtime = os.stat(filename).st_mtime
         while True:
             file_changed = _edit_message_open_editor(filename, data, mtime)
-            msg = open(filename).read().split(delim)[0].rstrip()
+            msg = open(filename).read()
+            if delim:
+                msg = msg.split(delim)[0].rstrip()
             if msg and file_changed:
                 break
             else:
                 reason = 'Log message not specified'
-                if template and template == msg:
+                if template == msg:
                     reason = 'Default log message was not changed. Press \'c\' to continue.'
                 ri = raw_input('%s\na)bort, c)ontinue, e)dit: ' % reason)
                 if ri in 'aA':
@@ -3906,7 +3961,7 @@ def create_submit_request(apiurl,
             print("WARNING:")
             print("WARNING: Project does not accept submit request, request to open a NEW maintenance incident instead")
             print("WARNING:")
-            xpath = 'maintenance/maintains/@project = \'%s\'' % dst_project
+            xpath = 'attribute/@name = \'%s\'' % conf.config['maintenance_attribute']
             res = search(apiurl, project_id=xpath)
             root = res['project_id']
             project = root.find('project')
@@ -3921,7 +3976,7 @@ def create_submit_request(apiurl,
 
 
 def get_request(apiurl, reqid):
-    u = makeurl(apiurl, ['request', reqid])
+    u = makeurl(apiurl, ['request', reqid], {'withfullhistory': '1'})
     f = http_GET(u)
     root = ET.parse(f).getroot()
 
@@ -6981,5 +7036,18 @@ def utime(filename, arg, ignore_einval=True):
         if e.errno == errno.EINVAL and ignore_einval:
             return
         raise
+
+def which(name):
+    """Searches "name" in PATH."""
+    name = os.path.expanduser(name)
+    if os.path.isabs(name):
+        if os.path.exists(name):
+            return name
+        return None
+    for directory in os.environ.get('PATH', '').split(':'):
+        path = os.path.join(directory, name)
+        if os.path.exists(path):
+            return path
+    return None
 
 # vim: sw=4 et

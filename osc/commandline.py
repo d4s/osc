@@ -693,13 +693,13 @@ class Osc(cmdln.Cmdln):
             osc meta prj PRJ
             osc meta pkg PRJ PKG
             osc meta pkg PRJ PKG -e
-            osc meta attribute PRJ [PKG [SUBPACKAGE]] [--attribute ATTRIBUTE] [--create|--delete|--set [value_list]]
 
         Usage:
-            osc meta <prj|pkg|prjconf|user|pattern|attribute> ARGS...
-            osc meta <prj|pkg|prjconf|user|pattern|attribute> -e|--edit ARGS...
-            osc meta <prj|pkg|prjconf|user|pattern|attribute> -F|--file ARGS...
+            osc meta <prj|pkg|prjconf|user|pattern> ARGS...
+            osc meta <prj|pkg|prjconf|user|pattern> -e|--edit ARGS...
+            osc meta <prj|pkg|prjconf|user|pattern> -F|--file ARGS...
             osc meta pattern --delete PRJ PATTERN
+            osc meta attribute PRJ [PKG [SUBPACKAGE]] [--attribute ATTRIBUTE] [--create|--delete|--set [value_list]]
         ${cmd_option_list}
         """
 
@@ -1286,7 +1286,6 @@ Please submit there instead, or use --nodevelproject to force direct submission.
             pi = []
             pac = []
             targetprojects = []
-            rdiffmsg = []
             # loop via all packages for checking their state
             for p in meta_get_packagelist(apiurl, project):
                 if p.startswith("_patchinfo:"):
@@ -1314,21 +1313,10 @@ Please submit there instead, or use --nodevelproject to force direct submission.
                         if rdiff != '':
                             targetprojects.append(t)
                             pac.append(p)
-                            rdiffmsg.append("old: %s/%s\nnew: %s/%s\n%s" % (t, p, project, p, rdiff))
                         else:
                             print("Skipping package ", p,  " since it has no difference with the target package.")
                     else:
                         print("Skipping package ", p,  " since it is a source link pointing inside the project.")
-            if opts.diff:
-                print(''.join(rdiffmsg))
-                sys.exit(0)
-
-                if not opts.yes:
-                    if pi:
-                        print("Submitting patchinfo ", ', '.join(pi), " to ", ', '.join(targetprojects))
-                    print("\nEverything fine? Can we create the requests ? [y/n]")
-                    if sys.stdin.read(1) != "y":
-                        sys.exit("Aborted...")
 
             # loop via all packages to do the action
             for p in pac:
@@ -1343,7 +1331,7 @@ Please submit there instead, or use --nodevelproject to force direct submission.
                            (project, p, t, p, options_block)
                     actionxml += s
 
-            return actionxml
+            return actionxml, []
 
         elif len(args) <= 2:
             # try using the working copy at hand
@@ -1397,45 +1385,29 @@ A different project, %s, is defined as the place where development
 of the package %s primarily takes place.
 Please submit there instead, or use --nodevelproject to force direct submission.""" \
                 % (devloc, dst_package))
-                if not opts.diff:
-                    sys.exit(1)
+                sys.exit(1)
 
-        rdiff = None
-        if opts.diff:
-            try:
-                rdiff = 'old: %s/%s\nnew: %s/%s\n' % (dst_project, dst_package, src_project, src_package)
-                rdiff += server_diff(apiurl,
-                                    dst_project, dst_package, opts.revision,
-                                    src_project, src_package, None, True)
-            except:
-                rdiff = ''
-        if opts.diff:
-            run_pager(rdiff)
-        else:
-            reqs = get_request_list(apiurl, dst_project, dst_package, req_type='submit', req_state=['new', 'review'])
-            user = conf.get_apiurl_usr(apiurl)
-            myreqs = [ i for i in reqs if i.state.who == user ]
-            repl = 'y'
-            if len(myreqs) > 0 and not opts.yes:
-                print('You already created the following submit request: %s.' % \
-                      ', '.join([i.reqid for i in myreqs ]))
-                repl = raw_input('Supersede the old requests? (y/n/c) ')
-                if repl.lower() == 'c':
-                    print('Aborting', file=sys.stderr)
-                    sys.exit(1)
+        reqs = get_request_list(apiurl, dst_project, dst_package, req_type='submit', req_state=['new', 'review'])
+        user = conf.get_apiurl_usr(apiurl)
+        myreqs = [ i for i in reqs if i.state.who == user and i.reqid != opts.supersede ]
+        repl = 'y'
+        if len(myreqs) > 0 and not opts.yes:
+            print('You already created the following submit request: %s.' % \
+                  ', '.join([i.reqid for i in myreqs ]))
+            repl = raw_input('Supersede the old requests? (y/n/c) ')
+            if repl.lower() == 'c':
+                print('Aborting', file=sys.stderr)
+                sys.exit(1)
+            elif repl.lower() != 'y':
+                myreqs = []
 
-            actionxml = """<action type="submit"> <source project="%s" package="%s"  rev="%s"/> <target project="%s" package="%s"/> %s </action>"""  % \
-                    (src_project, src_package, opts.revision or show_upstream_rev(apiurl, src_project, src_package), dst_project, dst_package, options_block)
-            if repl.lower() == 'y':
-                for req in myreqs:
-                    change_request_state(apiurl, req.reqid, 'superseded',
-                                         'superseded by %s' % result, result)
+        actionxml = """<action type="submit"> <source project="%s" package="%s"  rev="%s"/> <target project="%s" package="%s"/> %s </action>"""  % \
+                (src_project, src_package, opts.revision or show_upstream_rev(apiurl, src_project, src_package), dst_project, dst_package, options_block)
+        if opts.supersede:
+            myreqs.append(opts.supersede)
 
-            if opts.supersede:
-                change_request_state(apiurl, opts.supersede, 'superseded',  '', result)
-
-            #print 'created request id', result
-            return actionxml
+        #print 'created request id', result
+        return actionxml, myreqs
 
     def _delete_request(self, args, opts):
         if len(args) < 1:
@@ -1592,8 +1564,6 @@ Please submit there instead, or use --nodevelproject to force direct submission.
                   help='never remove source package on accept, but update its content')
     @cmdln.option('--no-update', action='store_true',
                   help='never touch source package on accept (will break source links)')
-    @cmdln.option('-d', '--diff', action='store_true',
-                  help='show diff only instead of creating the actual request')
     @cmdln.option('--yes', action='store_true',
                   help='proceed without asking.')
     @cmdln.alias("creq")
@@ -1637,11 +1607,14 @@ Please submit there instead, or use --nodevelproject to force direct submission.
         
         i = 0
         actionsxml = ""
+        supersede = []
         for ai in opts.actions:
             if ai == 'submit':
                 args = opts.actiondata[i]
                 i = i+1
-                actionsxml += self._submit_request(args, opts, options_block)
+                actions, to_supersede = self._submit_request(args, opts, options_block)
+                actionsxml += actions
+                supersede.extend(to_supersede)
             elif ai == 'delete':
                 args = opts.actiondata[i]
                 actionsxml += self._delete_request(args, opts)
@@ -1681,7 +1654,11 @@ Please submit there instead, or use --nodevelproject to force direct submission.
         f = http_POST(u, data=xml)
 
         root = ET.parse(f).getroot()
-        return root.get('id')
+        rid = root.get('id')
+        for srid in supersede:
+            change_request_state(apiurl, srid, 'superseded',
+                                 'superseded by %s' % rid, rid)
+        return rid
 
 
     @cmdln.option('-m', '--message', metavar='TEXT',
@@ -1958,6 +1935,9 @@ Please submit there instead, or use --nodevelproject to force direct submission.
 
         "checkout" will checkout the request's source package ("submit" requests only).
 
+        "priorize" change the prioritity of a request to either "critical", "important", "moderate" or "low"
+
+
         The 'review' command has the following sub commands:
 
         "list" lists open requests that need to be reviewed by the
@@ -1982,6 +1962,7 @@ Please submit there instead, or use --nodevelproject to force direct submission.
             osc request setincident [-m TEXT] ID INCIDENT
             osc request supersede [-m TEXT] ID SUPERSEDING_ID
             osc request approvenew [-m TEXT] PROJECT
+            osc request priorize [-m TEXT] ID PRIORITY
 
             osc request checkout/co ID
             osc request clone [-m TEXT] ID
@@ -2021,7 +2002,7 @@ Please submit there instead, or use --nodevelproject to force direct submission.
         if args[0] == 'help':
             return self.do_help(['help', 'request'])
 
-        cmds = ['list', 'log', 'show', 'decline', 'reopen', 'clone', 'accept', 'approvenew', 'wipe', 'setincident', 'supersede', 'revoke', 'checkout', 'co']
+        cmds = ['list', 'ls', 'log', 'show', 'decline', 'reopen', 'clone', 'accept', 'approvenew', 'wipe', 'setincident', 'supersede', 'revoke', 'checkout', 'co', 'priorize']
         if subcmd != 'review' and args[0] not in cmds:
             raise oscerr.WrongArgs('Unknown request action %s. Choose one of %s.' \
                                                % (args[0], ', '.join(cmds)))
@@ -2032,12 +2013,14 @@ Please submit there instead, or use --nodevelproject to force direct submission.
 
         cmd = args[0]
         del args[0]
+        if cmd == 'ls':
+            cmd = "list"
 
         apiurl = self.get_api_url()
 
         if cmd in ['list']:
             min_args, max_args = 0, 2
-        elif cmd in ['supersede', 'setincident']:
+        elif cmd in ['supersede', 'setincident', 'priorize']:
             min_args, max_args = 2, 2
         else:
             min_args, max_args = 1, 1
@@ -2074,6 +2057,9 @@ Please submit there instead, or use --nodevelproject to force direct submission.
         elif cmd == 'setincident':
             reqid = args[0]
             incident = args[1]
+        elif cmd == 'priorize':
+            reqid = args[0]
+            priority = args[1]
         elif cmd in ['log', 'add', 'show', 'decline', 'reopen', 'clone', 'accept', 'wipe', 'revoke', 'checkout', 'co']:
             reqid = args[0]
 
@@ -2085,6 +2071,13 @@ Please submit there instead, or use --nodevelproject to force direct submission.
         # change incidents
         elif cmd == 'setincident':
             query = { 'cmd': 'setincident', 'incident': incident }
+            url = makeurl(apiurl, ['request', reqid], query)
+            r = http_POST(url, data=opts.message)
+            print(ET.parse(r).getroot().get('code'))
+
+        # change priority
+        elif cmd == 'priorize':
+            query = { 'cmd': 'setpriority', 'priority': priority }
             url = makeurl(apiurl, ['request', reqid], query)
             r = http_POST(url, data=opts.message)
             print(ET.parse(r).getroot().get('code'))
@@ -2157,7 +2150,7 @@ Please submit there instead, or use --nodevelproject to force direct submission.
                     print('No results')
                 return
 
-            results.sort(reverse=True)
+            # we must not sort the results here, since the api is doing it already "the right way"
             days = opts.days or conf.config['request_list_days']
             since = ''
             try:
@@ -4276,9 +4269,10 @@ Please submit there instead, or use --nodevelproject to force direct submission.
 
         pacs = findpacs(args)
         for p in pacs:
-            p.todo = list(set(p.filenamelist + p.filenamelist_unvers + p.to_be_added))
-            for filename in p.todo:
-                if os.path.isdir(filename):
+            todo = list(set(p.filenamelist + p.filenamelist_unvers + p.to_be_added))
+            for filename in todo:
+                abs_filename = os.path.join(p.absdir, filename)
+                if os.path.isdir(abs_filename):
                     continue
                 # ignore foo.rXX, foo.mine for files which are in 'C' state
                 if os.path.splitext(filename)[0] in p.in_conflict:
@@ -4286,6 +4280,9 @@ Please submit there instead, or use --nodevelproject to force direct submission.
                 state = p.status(filename)
                 if state == '?':
                     # TODO: should ignore typical backup files suffix ~ or .orig
+                    p.addfile(filename)
+                elif state == 'D' and os.path.isfile(abs_filename):
+                    # if the "deleted" file exists in the wc, track it again
                     p.addfile(filename)
                 elif state == '!':
                     p.delete_file(filename)
@@ -5420,10 +5417,11 @@ Please submit there instead, or use --nodevelproject to force direct submission.
 
         repo_names = sorted(set([r.name for r in repositories]))
         if not arg_repository and repositories:
+            # XXX: we should avoid hardcoding repository names
             # Use a default value from config, but just even if it's available
-            # unless try standard, or openSUSE_Factory
+            # unless try standard, or openSUSE_Factory, or openSUSE_Tumbleweed
             arg_repository = repositories[-1].name
-            for repository in (conf.config['build_repository'], 'standard', 'openSUSE_Factory'):
+            for repository in (conf.config['build_repository'], 'standard', 'openSUSE_Factory', 'openSUSE_Tumbleweed'):
                 if repository in repo_names:
                     arg_repository = repository
                     break
@@ -5602,10 +5600,9 @@ Please submit there instead, or use --nodevelproject to force direct submission.
 
         import osc.build
 
-        if not os.path.exists('/usr/lib/build/debtransform') \
-                and not os.path.exists('/usr/lib/lbuild/debtransform'):
-            sys.stderr.write('Error: you need build.rpm with version 2007.3.12 or newer.\n')
-            sys.stderr.write('See http://download.opensuse.org/repositories/openSUSE:/Tools/\n')
+        if which(conf.config['build-cmd']) is None:
+            print('Error: build (\'%s\') command not found' % conf.config['build-cmd'], file=sys.stderr)
+            print('Install the build package from http://download.opensuse.org/repositories/openSUSE:/Tools/', file=sys.stderr)
             return 1
 
         if opts.debuginfo and opts.disable_debuginfo:
@@ -5802,8 +5799,10 @@ Please submit there instead, or use --nodevelproject to force direct submission.
                   help='specify the used build target project')
     @cmdln.option('--noinit', '--no-init', action='store_true',
                   help='do not guess/verify specified repository')
-    @cmdln.option('-r', '--root', action='store_true',
+    @cmdln.option('-r', '--login-as-root', action='store_true',
                   help='login as root instead of abuild')
+    @cmdln.option('--root', metavar='ROOT',
+                  help='Path to the buildroot')
     @cmdln.option('-o', '--offline', action='store_true',
                   help='Use cached data without contacting the api server')
     def do_chroot(self, subcmd, opts, *args):
@@ -5827,17 +5826,20 @@ Please submit there instead, or use --nodevelproject to force direct submission.
             sys.exit(1)
 
         user = 'abuild'
-        if opts.root:
+        if opts.login_as_root:
             user = 'root'
-        repository, arch, descr = self.parse_repoarchdescr(args, opts.noinit or opts.offline, opts.alternative_project)
-        project = opts.alternative_project or store_read_project('.')
-        if opts.local_package:
-            package = os.path.splitext(descr)[0]
-        else:
-            package = store_read_package('.')
-        apihost = urlsplit(self.get_api_url())[1]
-        buildroot = os.environ.get('OSC_BUILD_ROOT', conf.config['build-root']) \
-            % {'repo': repository, 'arch': arch, 'project': project, 'package': package, 'apihost': apihost}
+        buildroot = opts.root
+        if buildroot is None:
+            repository, arch, descr = self.parse_repoarchdescr(args, opts.noinit or opts.offline, opts.alternative_project)
+            project = opts.alternative_project or store_read_project('.')
+            if opts.local_package:
+                package = os.path.splitext(descr)[0]
+            else:
+                package = store_read_package('.')
+            apihost = urlsplit(self.get_api_url())[1]
+            if buildroot is None:
+                buildroot = os.environ.get('OSC_BUILD_ROOT', conf.config['build-root']) \
+                    % {'repo': repository, 'arch': arch, 'project': project, 'package': package, 'apihost': apihost}
         if not os.path.isdir(buildroot):
             raise oscerr.OscIOError(None, '\'%s\' is not a directory' % buildroot)
 
@@ -6070,7 +6072,7 @@ Please submit there instead, or use --nodevelproject to force direct submission.
             elif command == "disabledrun" or command == "dr":
                 mode = "disabled"
 
-        p.run_source_services(mode, singleservice)
+        return p.run_source_services(mode, singleservice)
 
     @cmdln.option('-a', '--arch', metavar='ARCH',
                         help='trigger rebuilds for a specific architecture')
@@ -6989,6 +6991,8 @@ Please submit there instead, or use --nodevelproject to force direct submission.
 
     @cmdln.option('-X', '-m', '--method', default='GET', metavar='HTTP_METHOD',
                         help='specify HTTP method to use (GET|PUT|DELETE|POST)')
+    @cmdln.option('-e', '--edit', default=None, action='store_true',
+                        help='GET, edit and PUT the location')
     @cmdln.option('-d', '--data', default=None, metavar='STRING',
                         help='specify string data for e.g. POST')
     @cmdln.option('-T', '-f', '--file', default=None, metavar='FILE',
@@ -7009,6 +7013,7 @@ Please submit there instead, or use --nodevelproject to force direct submission.
         Examples:
           osc api /source/home:user
           osc api -X PUT -T /etc/fstab source/home:user/test5/myfstab
+          osc api -e /configuration
 
         ${cmd_usage}
         ${cmd_option_list}
@@ -7036,10 +7041,17 @@ Please submit there instead, or use --nodevelproject to force direct submission.
                          data=opts.data,
                          file=opts.file,
                          headers=opts.headers)
-
         out = r.read()
-        sys.stdout.write(out)
 
+        if opts.edit:
+            text = edit_text(out)
+            r = http_request("PUT",
+                         url,
+                         data=text,
+                         headers=opts.headers)
+            out = r.read()
+
+        sys.stdout.write(out)
 
 
     @cmdln.option('-b', '--bugowner-only', action='store_true',
@@ -7901,18 +7913,16 @@ Please submit there instead, or use --nodevelproject to force direct submission.
             except IndexError:
                 pass
 
+        cmd_list = [conf.config['vc-cmd']]
         if meego_style:
             if not os.path.exists('/usr/bin/vc'):
                 print('Error: you need meego-packaging-tools for /usr/bin/vc command', file=sys.stderr)
                 return 1
             cmd_list = ['/usr/bin/vc']
-        else:
-            if not os.path.exists('/usr/lib/build/vc'):
-                print('Error: you need build.rpm with version 2009.04.17 or newer', file=sys.stderr)
-                print('See http://download.opensuse.org/repositories/openSUSE:/Tools/', file=sys.stderr)
-                return 1
-
-            cmd_list = ['/usr/lib/build/vc']
+        elif which(cmd_list[0]) is None:
+            print('Error: vc (\'%s\') command not found' % cmd_list[0], file=sys.stderr)
+            print('Install the build package from http://download.opensuse.org/repositories/openSUSE:/Tools/', file=sys.stderr)
+            return 1
 
         # set user's email if no mailaddr exists
         if 'mailaddr' not in os.environ:

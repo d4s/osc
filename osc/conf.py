@@ -172,6 +172,8 @@ DEFAULTS = {'apiurl': 'https://api.opensuse.org',
             'maintenance_attribute': 'OBS:MaintenanceProject',
             'maintained_update_project_attribute': 'OBS:UpdateProject',
             'show_download_progress': '0',
+            # path to the vc script
+            'vc-cmd': '/usr/lib/build/vc'
 }
 
 # being global to this module, this dict can be accessed from outside
@@ -450,7 +452,7 @@ def _build_opener(url):
 
     # workaround for http://bugs.python.org/issue9639
     authhandler_class = HTTPBasicAuthHandler
-    if sys.version_info >= (2, 6, 6) and sys.version_info < (2, 7, 1) \
+    if sys.version_info >= (2, 6, 6) and sys.version_info < (2, 7, 99) \
         and not 'reset_retry_count' in dir(HTTPBasicAuthHandler):
         print('warning: your urllib2 version seems to be broken. ' \
             'Using a workaround for http://bugs.python.org/issue9639', file=sys.stderr)
@@ -511,10 +513,10 @@ def _build_opener(url):
                     capath = i
                     break
         if not cafile and not capath:
-            raise Exception('No CA certificates found')
+            raise oscerr.OscIOError(None, 'No CA certificates found')
         ctx = oscssl.mySSLContext()
         if ctx.load_verify_locations(capath=capath, cafile=cafile) != 1:
-            raise Exception('No CA certificates found')
+            raise oscerr.OscIOError(None, 'No CA certificates found')
         opener = m2urllib2.build_opener(ctx, oscssl.myHTTPSHandler(ssl_context=ctx, appname='osc'), HTTPCookieProcessor(cookiejar), authhandler, proxyhandler)
     else:
         print("WARNING: SSL certificate checks disabled. Connection is insecure!\n", file=sys.stderr)
